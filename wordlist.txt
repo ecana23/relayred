@@ -1,9 +1,9 @@
-123456
-password
+a
 TAIL
+b
 admin
 root
-guest
+TAIL
 ftp123
 siemens
 relaysecure

